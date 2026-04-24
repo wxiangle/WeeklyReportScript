@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import os
 import subprocess
@@ -82,6 +83,11 @@ def _parse_args() -> argparse.Namespace:
         "--no-ai-polish",
         action="store_true",
         help="关闭 DeepSeek 润色，直接使用原始周报内容。",
+    )
+    parser.add_argument(
+        "--refresh-ai-cache",
+        action="store_true",
+        help="忽略本周 AI 缓存，重新调用 DeepSeek 并覆盖缓存。",
     )
     return parser.parse_args()
 
@@ -231,32 +237,20 @@ def _collect_commits(repos: Iterable[Path], since_dt: dt.datetime, until_dt: dt.
 
 
 def _build_report_text(commits: list[Commit], since_dt: dt.datetime, until_dt: dt.datetime) -> str:
-    header = [
-        "# 本周 Git 提交周报",
-        f"统计区间: {since_dt:%Y-%m-%d %H:%M:%S} ~ {until_dt:%Y-%m-%d %H:%M:%S}",
-        f"提交总数: {len(commits)}",
-        "",
-    ]
+    _ = (since_dt, until_dt)
+    lines = ["# 本周 Git 提交周报"]
 
     if not commits:
-        header.append("本周暂无提交记录。")
-        return "\n".join(header)
+        lines.append("本周暂无提交记录。")
+        return "\n".join(lines)
 
-    repo_counter: dict[str, int] = {}
+    lines.append("## 提交明细")
     for c in commits:
-        repo_counter[c.repo_name] = repo_counter.get(c.repo_name, 0) + 1
-
-    summary_lines = ["## 按仓库统计"]
-    for repo_name, count in sorted(repo_counter.items(), key=lambda x: x[1], reverse=True):
-        summary_lines.append(f"- {repo_name}: {count} 次提交")
-
-    detail_lines = ["", "## 提交明细"]
-    for c in commits:
-        detail_lines.append(
+        lines.append(
             f"- [{c.repo_name}] {c.message} ({c.author}, {c.commit_time:%Y-%m-%d %H:%M}, {c.commit_id[:8]})"
         )
 
-    return "\n".join(header + summary_lines + detail_lines)
+    return "\n".join(lines)
 
 
 def _truncate_text(text: str, max_len: int) -> str:
@@ -313,12 +307,44 @@ def _send_to_feishu(webhook_url: str, payload: dict) -> None:
     except json.JSONDecodeError:
         raise RuntimeError(f"飞书返回非 JSON 响应: {resp_body}")
 
-    if data.get("code") not in (0, "0"):
-        raise RuntimeError(f"飞书返回错误: {data}")
+    code = data.get("code")
+    if code not in (0, "0"):
+        if code == 11232:
+            raise RuntimeError(
+                "飞书机器人频率限制。请稍后（通常几秒到几分钟）后重试。"
+                "如频繁遇到此问题，可联系飞书管理员调整机器人配额。"
+            )
+        msg = data.get("msg", "未知错误")
+        raise RuntimeError(f"飞书返回错误 (code {code}): {msg}")
 
 
 def _build_deepseek_url(base_url: str) -> str:
     return f"{base_url.rstrip('/')}/chat/completions"
+
+
+def _build_ai_cache_path(repos: list[Path], since_dt: dt.datetime) -> Path:
+    # 缓存粒度按“周 + 仓库集合”，减少重复调用 DeepSeek。
+    week_start = (since_dt - dt.timedelta(days=since_dt.weekday())).date()
+    repo_signature = "|".join(sorted(str(repo) for repo in repos))
+    repo_hash = hashlib.sha1(repo_signature.encode("utf-8")).hexdigest()[:10]
+    cache_dir = Path(".cache")
+    cache_name = f"deepseek_{week_start:%Y%m%d}_{repo_hash}.md"
+    return cache_dir / cache_name
+
+
+def _load_ai_cache(cache_path: Path) -> str | None:
+    if not cache_path.exists():
+        return None
+    try:
+        text = cache_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return None
+    return text or None
+
+
+def _save_ai_cache(cache_path: Path, report_text: str) -> None:
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    cache_path.write_text(report_text, encoding="utf-8")
 
 
 def _polish_report_with_deepseek(
@@ -337,8 +363,8 @@ def _polish_report_with_deepseek(
     prompt = (
         "请将以下周报内容进行专业润色，输出中文。要求：\n"
         "1) 保留事实，不杜撰；\n"
-        "2) 先给一个简洁总结；\n"
-        "3) 再给按仓库统计和关键提交点；\n"
+        "2) 内容简洁，直接给可汇报版本；\n"
+        "3) 不要包含“统计区间”“提交总数”“按仓库统计”“关键提交点”这些标题或段落；\n"
         "4) 风格适合向团队汇报；\n"
         "5) 输出使用纯文本/Markdown，不要代码块。\n\n"
         f"统计区间: {since_dt:%Y-%m-%d %H:%M:%S} ~ {until_dt:%Y-%m-%d %H:%M:%S}\n\n"
@@ -431,21 +457,37 @@ def main() -> int:
     report_text = _build_report_text(commits, since_dt, until_dt)
     ai_enabled = cfg.deepseek_enabled and not args.no_ai_polish
     deepseek_api_key = cfg.deepseek_api_key or os.getenv("DEEPSEEK_API_KEY", "")
+    ai_cache_path = _build_ai_cache_path(repos, since_dt)
 
     if ai_enabled:
-        try:
-            report_text = _polish_report_with_deepseek(
-                report_text=report_text,
-                since_dt=since_dt,
-                until_dt=until_dt,
-                api_key=deepseek_api_key,
-                base_url=cfg.deepseek_base_url,
-                model=cfg.deepseek_model,
-                temperature=cfg.deepseek_temperature,
-            )
-            print("\n已完成 DeepSeek 润色。")
-        except RuntimeError as exc:
-            print(f"DeepSeek 润色失败，已回退到原始周报: {exc}", file=sys.stderr)
+        used_cache = False
+        if not args.refresh_ai_cache:
+            cached_report = _load_ai_cache(ai_cache_path)
+            if cached_report:
+                report_text = cached_report
+                used_cache = True
+                print(f"\n已使用本周 DeepSeek 缓存: {ai_cache_path}")
+
+        if not used_cache:
+            try:
+                report_text = _polish_report_with_deepseek(
+                    report_text=report_text,
+                    since_dt=since_dt,
+                    until_dt=until_dt,
+                    api_key=deepseek_api_key,
+                    base_url=cfg.deepseek_base_url,
+                    model=cfg.deepseek_model,
+                    temperature=cfg.deepseek_temperature,
+                )
+                _save_ai_cache(ai_cache_path, report_text)
+                if args.refresh_ai_cache:
+                    print(f"\n已刷新 DeepSeek 缓存: {ai_cache_path}")
+                else:
+                    print(f"\n已完成 DeepSeek 润色并写入缓存: {ai_cache_path}")
+            except RuntimeError as exc:
+                print(f"DeepSeek 润色失败，已回退到原始周报: {exc}", file=sys.stderr)
+            except OSError as exc:
+                print(f"缓存写入失败，但不影响发送: {exc}", file=sys.stderr)
 
     print("\n========== 周报预览开始 ==========")
     print(report_text)

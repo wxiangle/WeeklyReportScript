@@ -71,12 +71,13 @@ python3 weekly_report.py --dry-run
 - `--dry-run`: 仅打印周报，不发送飞书
 - `--yes`: 跳过发送前确认，直接发送
 - `--no-ai-polish`: 关闭 DeepSeek 润色，直接发送原始周报
+- `--refresh-ai-cache`: 重新调用 DeepSeek 并覆盖本周缓存
 
 如果不传 `repos`，脚本按顺序读取：`config.yaml` 的 `projects` -> 交互输入。
 
 Webhook 读取顺序：`--webhook-url` -> `config.yaml` -> `FEISHU_WEBHOOK_URL`。
 
-DeepSeek API Key 读取顺序：`config.yaml` 的 `deepseek.api_key` -> `DEEPSEEK_API_KEY`。
+DeepSeek API Key：使用环境变量 `DEEPSEEK_API_KEY`。
 
 ## YAML 配置示例
 
@@ -96,7 +97,6 @@ projects:
 ```yaml
 deepseek:
   enabled: true
-  api_key: ""
   base_url: "https://api.deepseek.com"
   model: "deepseek-chat"
   temperature: 0.4
@@ -106,7 +106,9 @@ deepseek:
 
 - `enabled: true` 时会先进行 AI 润色，再进入预览确认流程
 - 若 DeepSeek 调用失败，脚本会自动回退到原始周报
-- `deepseek.api_key` 建议留空，优先使用环境变量 `DEEPSEEK_API_KEY`
+- DeepSeek 密钥请仅通过环境变量 `DEEPSEEK_API_KEY` 提供
+- 默认会复用本周 AI 润色缓存（位于 `.cache/`），避免重复消耗 token
+- 需要重新生成本周润色结果时，使用 `--refresh-ai-cache`
 
 设置环境变量（zsh 示例）：
 

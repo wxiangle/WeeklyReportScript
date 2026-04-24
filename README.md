@@ -12,6 +12,7 @@
 - 使用飞书机器人 Webhook 发送飞书交互卡片周报
 - 发送前强制预览，确认无误后再提交
 - 支持 `--dry-run` 仅预览不发送
+- 支持 AI 润色模式切换：**简洁模式**（每条≤25字，条数不限）或 **详细模式**（保留完整技术描述）
 
 ## 运行要求
 
@@ -72,6 +73,7 @@ python3 weekly_report.py --dry-run
 - `--yes`: 跳过发送前确认，直接发送
 - `--no-ai-polish`: 关闭 DeepSeek 润色，直接发送原始周报
 - `--refresh-ai-cache`: 重新调用 DeepSeek 并覆盖本周缓存
+- `--polish-mode`: AI 润色模式，`concise`（简洁，每条≤25字，条数不限）或 `detailed`（详细），优先于 YAML 配置
 
 如果不传 `repos`，脚本按顺序读取：`config.yaml` 的 `projects` -> 交互输入。
 
@@ -112,6 +114,7 @@ deepseek:
   base_url: "https://api.deepseek.com"
   model: "deepseek-chat"
   temperature: 0.4
+  polish_mode: concise  # concise（简洁）| detailed（详细）
 ```
 
 说明：
@@ -121,7 +124,24 @@ deepseek:
 - DeepSeek 密钥请仅通过环境变量 `DEEPSEEK_API_KEY` 提供
 - 默认会复用本周 AI 润色缓存（位于 `.cache/`），避免重复消耗 token
 - 需要重新生成本周润色结果时，使用 `--refresh-ai-cache`
-- 若修改了 `project_name_rules`，建议加 `--refresh-ai-cache` 强制刷新本周文案
+- 若修改了 `project_name_rules` 或 `polish_mode`，建议加 `--refresh-ai-cache` 强制刷新本周文案
+
+### AI 润色模式对比
+
+| 模式 | 每条字数 | 每项目条数 | 适合场景 |
+|------|----------|------------|----------|
+| `concise` | ≤25 字，动宾短语 | 不限，保留全部 | 飞书快速汇报、团队周会 |
+| `detailed` | 无限制，保留技术细节 | 无限制 | 正式周报归档、需求复盘 |
+
+通过 YAML 配置持久生效，也可用 CLI 参数单次覆盖（优先级更高）：
+
+```bash
+# 单次使用详细模式
+./run_weekly.sh --polish-mode detailed
+
+# 单次使用简洁模式（并刷新缓存）
+./run_weekly.sh --polish-mode concise --refresh-ai-cache
+```
 
 设置环境变量（zsh 示例）：
 

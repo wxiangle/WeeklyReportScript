@@ -9,6 +9,7 @@ deepseek:
   base_url: "https://api.deepseek.com"
   model: "deepseek-chat"
   temperature: 0.4
+  polish_mode: concise  # concise（简洁，每条≤25字，条数不限） | detailed（详细，保留完整技术描述）
 
 title: "本周工作周报"
 

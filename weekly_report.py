@@ -26,6 +26,7 @@ class ScriptConfig:
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-chat"
     deepseek_temperature: float = 0.4
+    deepseek_polish_mode: str = "concise"  # "concise" | "detailed"
     project_name_rules: list[tuple[str, list[str]]] | None = None
 
 
@@ -90,6 +91,13 @@ def _parse_args() -> argparse.Namespace:
         action="store_true",
         help="忽略本周 AI 缓存，重新调用 DeepSeek 并覆盖缓存。",
     )
+    parser.add_argument(
+        "--polish-mode",
+        choices=["concise", "detailed"],
+        default=None,
+        dest="polish_mode",
+        help="AI 润色模式：concise（简洁，≤25字/条，≤6条）或 detailed（详细，完整描述）。优先于 YAML 配置。",
+    )
     return parser.parse_args()
 
 
@@ -153,6 +161,8 @@ def _load_yaml_config(config_path: str) -> ScriptConfig:
             project_name_rules.append((name.strip(), cleaned_keywords))
 
     title = data.get("title")
+    raw_mode = str(deepseek.get("polish_mode", "concise")).strip().lower()
+    polish_mode = raw_mode if raw_mode in {"concise", "detailed"} else "concise"
     return ScriptConfig(
         webhook_url=str(feishu.get("webhook_url", "")).strip(),
         repos=repos,
@@ -163,6 +173,7 @@ def _load_yaml_config(config_path: str) -> ScriptConfig:
         or "https://api.deepseek.com",
         deepseek_model=str(deepseek.get("model", "deepseek-chat")).strip() or "deepseek-chat",
         deepseek_temperature=_to_float(deepseek.get("temperature"), 0.4),
+        deepseek_polish_mode=polish_mode,
         project_name_rules=project_name_rules,
     )
 
@@ -398,6 +409,54 @@ def _extract_project_names(commits: list[Commit]) -> list[str]:
     return names
 
 
+def _build_polish_prompt(
+    report_text: str,
+    since_dt: dt.datetime,
+    until_dt: dt.datetime,
+    project_names: list[str],
+    polish_mode: str,
+) -> str:
+    section_template = "\n".join(f"## {name}" for name in project_names) if project_names else "## 项目一"
+    project_name_rules_str = (
+        "\n".join(f"- {name}" for name in project_names)
+        if project_names
+        else "- （无）"
+    )
+    common_rules = (
+        "请将以下周报内容进行专业润色，输出中文。要求：\n"
+        "1) 保留事实，不杜撰；\n"
+    )
+    if polish_mode == "detailed":
+        style_rules = (
+            "2) 完整保留每条工作项的技术细节，语言流畅即可，不压缩信息；\n"
+            "3) 每个项目段落条数不限，各条之间保持适当分段；\n"
+        )
+    else:  # concise
+        style_rules = (
+            "2) 内容高度精炼，每条工作项控制在 25 字以内，用最简短的动宾短语表达；\n"
+            "3) 条数不限，保留所有工作项，不得遗漏；\n"
+        )
+    structure_rules = (
+        "4) 不要包含「统计区间」「提交总数」「按仓库统计」「关键提交点」这些标题或段落；\n"
+        "5) 必须严格使用下面给定的项目名称作为分段标题，不能改写成「Android 端/Flutter 端」等泛化名称；\n"
+        "6) 每个项目都要有独立段落，标题格式必须是二级标题；\n"
+        "7) 风格适合向团队汇报；\n"
+        "8) 输出使用纯文本/Markdown，不要代码块。\n\n"
+    )
+    return (
+        common_rules
+        + style_rules
+        + structure_rules
+        + "必须原样使用的项目名称：\n"
+        + f"{project_name_rules_str}\n\n"
+        + "输出模板（标题请替换为上面的项目名，并保持二级标题格式）：\n"
+        + f"{section_template}\n\n"
+        + f"统计区间: {since_dt:%Y-%m-%d %H:%M:%S} ~ {until_dt:%Y-%m-%d %H:%M:%S}\n\n"
+        + "原始周报:\n"
+        + report_text
+    )
+
+
 def _polish_report_with_deepseek(
     *,
     report_text: str,
@@ -408,34 +467,12 @@ def _polish_report_with_deepseek(
     base_url: str,
     model: str,
     temperature: float,
+    polish_mode: str = "concise",
 ) -> str:
     if not api_key:
         raise RuntimeError("DeepSeek API Key 为空，无法进行润色。")
 
-    section_template = "\n".join(f"## {name}" for name in project_names) if project_names else "## 项目一"
-    project_name_rules = (
-        "\n".join(f"- {name}" for name in project_names)
-        if project_names
-        else "- （无）"
-    )
-
-    prompt = (
-        "请将以下周报内容进行专业润色，输出中文。要求：\n"
-        "1) 保留事实，不杜撰；\n"
-        "2) 内容简洁，直接给可汇报版本；\n"
-        "3) 不要包含“统计区间”“提交总数”“按仓库统计”“关键提交点”这些标题或段落；\n"
-        "4) 必须严格使用下面给定的项目名称作为分段标题，不能改写成“Android 端/Flutter 端”等泛化名称；\n"
-        "5) 每个项目都要有独立段落，标题格式必须是二级标题；\n"
-        "6) 风格适合向团队汇报；\n"
-        "7) 输出使用纯文本/Markdown，不要代码块。\n\n"
-        "必须原样使用的项目名称：\n"
-        f"{project_name_rules}\n\n"
-        "输出模板（标题请替换为上面的项目名，并保持二级标题格式）：\n"
-        f"{section_template}\n\n"
-        f"统计区间: {since_dt:%Y-%m-%d %H:%M:%S} ~ {until_dt:%Y-%m-%d %H:%M:%S}\n\n"
-        "原始周报:\n"
-        f"{report_text}"
-    )
+    prompt = _build_polish_prompt(report_text, since_dt, until_dt, project_names, polish_mode)
 
     payload = {
         "model": model,
@@ -523,7 +560,8 @@ def main() -> int:
     ai_enabled = cfg.deepseek_enabled and not args.no_ai_polish
     deepseek_api_key = cfg.deepseek_api_key or os.getenv("DEEPSEEK_API_KEY", "")
     project_names = _extract_project_names(commits)
-    cache_seed = report_text + "\n__PROMPT_SCHEMA_V2__" + "|".join(project_names)
+    polish_mode = args.polish_mode or cfg.deepseek_polish_mode
+    cache_seed = report_text + "\n__PROMPT_SCHEMA_V4__" + "|".join(project_names) + "|mode=" + polish_mode
     ai_cache_path = _build_ai_cache_path(repos, since_dt, cache_seed)
 
     if ai_enabled:
@@ -546,6 +584,7 @@ def main() -> int:
                     base_url=cfg.deepseek_base_url,
                     model=cfg.deepseek_model,
                     temperature=cfg.deepseek_temperature,
+                    polish_mode=polish_mode,
                 )
                 _save_ai_cache(ai_cache_path, report_text)
                 if args.refresh_ai_cache:

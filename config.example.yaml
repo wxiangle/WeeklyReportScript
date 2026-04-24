@@ -1,0 +1,20 @@
+# 复制为 config.yaml 后使用
+# cp config.example.yaml config.yaml
+
+feishu:
+  webhook_url: "https://open.feishu.cn/open-apis/bot/v2/hook/replace_me"
+
+deepseek:
+  enabled: true
+  api_key: ""
+  base_url: "https://api.deepseek.com"
+  model: "deepseek-chat"
+  temperature: 0.4
+
+title: "本周工作周报"
+
+# 支持 1 个、2 个或 N 个仓库目录
+projects:
+  - "/path/to/repo-a"
+  - "/path/to/repo-b"
+  - "/path/to/repo-c"

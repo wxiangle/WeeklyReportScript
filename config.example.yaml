@@ -18,3 +18,10 @@ projects:
   - "/path/to/repo-a"
   - "/path/to/repo-b"
   - "/path/to/repo-c"
+
+# 项目显示名匹配规则：按目录路径关键字匹配，命中后使用 name 作为周报里的项目名
+project_name_rules:
+  - name: "repo-a"
+    keywords: ["repo-a", "a"]
+  - name: "repo-b"
+    keywords: ["repo-b", "b"]

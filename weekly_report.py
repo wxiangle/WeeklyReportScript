@@ -26,6 +26,7 @@ class ScriptConfig:
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-chat"
     deepseek_temperature: float = 0.4
+    project_name_rules: list[tuple[str, list[str]]] | None = None
 
 
 @dataclass
@@ -127,10 +128,29 @@ def _load_yaml_config(config_path: str) -> ScriptConfig:
     data = loaded if isinstance(loaded, dict) else {}
     feishu = data.get("feishu") if isinstance(data.get("feishu"), dict) else {}
     deepseek = data.get("deepseek") if isinstance(data.get("deepseek"), dict) else {}
+    raw_name_rules = data.get("project_name_rules")
     raw_repos = data.get("projects")
     repos: list[str] | None = None
     if isinstance(raw_repos, list):
         repos = [str(item).strip() for item in raw_repos if str(item).strip()]
+
+    project_name_rules: list[tuple[str, list[str]]] = []
+    if isinstance(raw_name_rules, list):
+        for item in raw_name_rules:
+            if not isinstance(item, dict):
+                continue
+            name = item.get("name")
+            keywords = item.get("keywords")
+            if not isinstance(name, str) or not name.strip():
+                continue
+            if not isinstance(keywords, list):
+                continue
+            cleaned_keywords = [
+                str(k).strip().lower() for k in keywords if str(k).strip()
+            ]
+            if not cleaned_keywords:
+                continue
+            project_name_rules.append((name.strip(), cleaned_keywords))
 
     title = data.get("title")
     return ScriptConfig(
@@ -143,6 +163,7 @@ def _load_yaml_config(config_path: str) -> ScriptConfig:
         or "https://api.deepseek.com",
         deepseek_model=str(deepseek.get("model", "deepseek-chat")).strip() or "deepseek-chat",
         deepseek_temperature=_to_float(deepseek.get("temperature"), 0.4),
+        project_name_rules=project_name_rules,
     )
 
 
@@ -228,10 +249,29 @@ def _run_git_log(repo: Path, since_dt: dt.datetime, until_dt: dt.datetime) -> li
     return commits
 
 
-def _collect_commits(repos: Iterable[Path], since_dt: dt.datetime, until_dt: dt.datetime) -> list[Commit]:
+def _resolve_project_display_name(repo: Path, cfg: ScriptConfig) -> str:
+    rules = cfg.project_name_rules or []
+    target = str(repo).lower()
+    for display_name, keywords in rules:
+        for kw in keywords:
+            if kw in target:
+                return display_name
+    return repo.name
+
+
+def _collect_commits(
+    repos: Iterable[Path],
+    since_dt: dt.datetime,
+    until_dt: dt.datetime,
+    cfg: ScriptConfig,
+) -> list[Commit]:
     all_commits: list[Commit] = []
     for repo in repos:
-        all_commits.extend(_run_git_log(repo, since_dt, until_dt))
+        display_name = _resolve_project_display_name(repo, cfg)
+        repo_commits = _run_git_log(repo, since_dt, until_dt)
+        for commit in repo_commits:
+            commit.repo_name = display_name
+        all_commits.extend(repo_commits)
     all_commits.sort(key=lambda c: c.commit_time, reverse=True)
     return all_commits
 
@@ -322,13 +362,14 @@ def _build_deepseek_url(base_url: str) -> str:
     return f"{base_url.rstrip('/')}/chat/completions"
 
 
-def _build_ai_cache_path(repos: list[Path], since_dt: dt.datetime) -> Path:
+def _build_ai_cache_path(repos: list[Path], since_dt: dt.datetime, seed_text: str) -> Path:
     # 缓存粒度按“周 + 仓库集合”，减少重复调用 DeepSeek。
     week_start = (since_dt - dt.timedelta(days=since_dt.weekday())).date()
     repo_signature = "|".join(sorted(str(repo) for repo in repos))
+    seed_hash = hashlib.sha1(seed_text.encode("utf-8")).hexdigest()[:10]
     repo_hash = hashlib.sha1(repo_signature.encode("utf-8")).hexdigest()[:10]
     cache_dir = Path(".cache")
-    cache_name = f"deepseek_{week_start:%Y%m%d}_{repo_hash}.md"
+    cache_name = f"deepseek_{week_start:%Y%m%d}_{repo_hash}_{seed_hash}.md"
     return cache_dir / cache_name
 
 
@@ -347,11 +388,22 @@ def _save_ai_cache(cache_path: Path, report_text: str) -> None:
     cache_path.write_text(report_text, encoding="utf-8")
 
 
+def _extract_project_names(commits: list[Commit]) -> list[str]:
+    names: list[str] = []
+    seen: set[str] = set()
+    for commit in commits:
+        if commit.repo_name not in seen:
+            names.append(commit.repo_name)
+            seen.add(commit.repo_name)
+    return names
+
+
 def _polish_report_with_deepseek(
     *,
     report_text: str,
     since_dt: dt.datetime,
     until_dt: dt.datetime,
+    project_names: list[str],
     api_key: str,
     base_url: str,
     model: str,
@@ -360,13 +412,26 @@ def _polish_report_with_deepseek(
     if not api_key:
         raise RuntimeError("DeepSeek API Key 为空，无法进行润色。")
 
+    section_template = "\n".join(f"## {name}" for name in project_names) if project_names else "## 项目一"
+    project_name_rules = (
+        "\n".join(f"- {name}" for name in project_names)
+        if project_names
+        else "- （无）"
+    )
+
     prompt = (
         "请将以下周报内容进行专业润色，输出中文。要求：\n"
         "1) 保留事实，不杜撰；\n"
         "2) 内容简洁，直接给可汇报版本；\n"
         "3) 不要包含“统计区间”“提交总数”“按仓库统计”“关键提交点”这些标题或段落；\n"
-        "4) 风格适合向团队汇报；\n"
-        "5) 输出使用纯文本/Markdown，不要代码块。\n\n"
+        "4) 必须严格使用下面给定的项目名称作为分段标题，不能改写成“Android 端/Flutter 端”等泛化名称；\n"
+        "5) 每个项目都要有独立段落，标题格式必须是二级标题；\n"
+        "6) 风格适合向团队汇报；\n"
+        "7) 输出使用纯文本/Markdown，不要代码块。\n\n"
+        "必须原样使用的项目名称：\n"
+        f"{project_name_rules}\n\n"
+        "输出模板（标题请替换为上面的项目名，并保持二级标题格式）：\n"
+        f"{section_template}\n\n"
         f"统计区间: {since_dt:%Y-%m-%d %H:%M:%S} ~ {until_dt:%Y-%m-%d %H:%M:%S}\n\n"
         "原始周报:\n"
         f"{report_text}"
@@ -449,7 +514,7 @@ def main() -> int:
             return 2
 
     try:
-        commits = _collect_commits(repos, since_dt, until_dt)
+        commits = _collect_commits(repos, since_dt, until_dt, cfg)
     except RuntimeError as exc:
         print(str(exc), file=sys.stderr)
         return 1
@@ -457,7 +522,9 @@ def main() -> int:
     report_text = _build_report_text(commits, since_dt, until_dt)
     ai_enabled = cfg.deepseek_enabled and not args.no_ai_polish
     deepseek_api_key = cfg.deepseek_api_key or os.getenv("DEEPSEEK_API_KEY", "")
-    ai_cache_path = _build_ai_cache_path(repos, since_dt)
+    project_names = _extract_project_names(commits)
+    cache_seed = report_text + "\n__PROMPT_SCHEMA_V2__" + "|".join(project_names)
+    ai_cache_path = _build_ai_cache_path(repos, since_dt, cache_seed)
 
     if ai_enabled:
         used_cache = False
@@ -474,6 +541,7 @@ def main() -> int:
                     report_text=report_text,
                     since_dt=since_dt,
                     until_dt=until_dt,
+                    project_names=project_names,
                     api_key=deepseek_api_key,
                     base_url=cfg.deepseek_base_url,
                     model=cfg.deepseek_model,

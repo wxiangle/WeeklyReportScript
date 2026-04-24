@@ -90,7 +90,19 @@ title: "本周工作周报"
 projects:
   - "/path/to/repo-a"
   - "/path/to/repo-b"
+
+project_name_rules:
+  - name: "Android 端"
+    keywords: ["gacha-android", "android"]
+  - name: "Flutter 端"
+    keywords: ["gacha-flutter", "flutter"]
 ```
+
+`project_name_rules` 用于把目录路径映射成周报展示名：
+
+- 会按 `keywords` 是否出现在项目目录路径中进行匹配
+- 命中后使用对应 `name` 作为周报中的项目名
+- 若都未命中，默认使用仓库目录名
 
 ## DeepSeek 配置示例
 
@@ -109,6 +121,7 @@ deepseek:
 - DeepSeek 密钥请仅通过环境变量 `DEEPSEEK_API_KEY` 提供
 - 默认会复用本周 AI 润色缓存（位于 `.cache/`），避免重复消耗 token
 - 需要重新生成本周润色结果时，使用 `--refresh-ai-cache`
+- 若修改了 `project_name_rules`，建议加 `--refresh-ai-cache` 强制刷新本周文案
 
 设置环境变量（zsh 示例）：
 

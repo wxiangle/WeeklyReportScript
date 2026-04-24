@@ -94,10 +94,10 @@ projects:
   - "/path/to/repo-b"
 
 project_name_rules:
-  - name: "Android 端"
-    keywords: ["gacha-android", "android"]
-  - name: "Flutter 端"
-    keywords: ["gacha-flutter", "flutter"]
+  - name: "项目 repo-a"
+    keywords: ["repo-a", "a"]
+  - name: "项目 repo-a"
+    keywords: ["grepo-a", "b"]
 ```
 
 `project_name_rules` 用于把目录路径映射成周报展示名：
